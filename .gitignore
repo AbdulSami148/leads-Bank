@@ -1,0 +1,36 @@
+# --- Environment variables (secrets — never commit) -----------------------
+backend/.env
+frontend/.env.local
+.env
+.env.*
+!.env.example
+
+# --- Google service account keys ------------------------------------------
+backend/service_account.json
+**/service_account.json
+**/*service_account*.json
+**/*-service-account*.json
+
+# --- Dependency directories -----------------------------------------------
+node_modules/
+.venv/
+venv/
+.env/
+
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg/
+.build/
+
+# --- Next.js --------------------------------------------------------------
+.next/
+out/
+
+# --- IDE / OS -------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store

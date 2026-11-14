@@ -1,0 +1,11 @@
+fastapi==0.162.0
+uvicorn==0.54.0
+supabase==2.34.1
+supabase-auth==2.34.1
+pydantic==2.14.3
+pydantic-settings==2.16.2
+python-dotenv==1.2.4
+apify-client==3.5.0
+gspread==6.2.1
+google-auth==2.62.2
+requests==2.34.2
