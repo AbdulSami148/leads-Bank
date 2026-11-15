@@ -3,6 +3,11 @@
 fetch_new_leads NEVER writes to deliveries; the caller records them via
 mark_delivered. Uses the service-key Supabase client from app.db.
 
+Every delivered lead is verified in the SAME run: bank leads are re-checked
+with Apify (fresh followers, bio, privacy flag) before they are handed out, and
+leads scraped in Step B are fresh by definition. A lead that no longer passes
+the filters is marked 'rejected' and is never delivered.
+
 Discovery is round-based and cost-aware: each round runs Serper searches in
 parallel (5 workers) until enough NEW candidates are collected, then makes
 exactly one Apify scrape per batch of up to 100 usernames.
@@ -11,7 +16,8 @@ exactly one Apify scrape per batch of up to 100 usernames.
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Final
+from datetime import datetime, timezone
+from typing import Final, Optional
 
 from supabase import Client
 
@@ -31,17 +37,119 @@ CANDIDATE_YIELD: Final[float] = 0.25   # expected fraction of candidates that su
 # --- database helpers -----------------------------------------------------------
 
 
-def _bank(db: Client, user_id: str, count: int) -> list[dict]:
-    """Step A: up to `count` accepted leads this user has NOT received yet."""
+def _now_iso() -> str:
+    """Current UTC time as an ISO string (PostgREST-friendly)."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+# Cached result of the last_checked_at column probe (None = not probed yet).
+_HAS_LAST_CHECKED_AT: Optional[bool] = None
+
+
+def _has_last_checked_at(db: Client) -> bool:
+    """True when public.leads has the last_checked_at column (migration_6a).
+
+    The column is added by a manual migration, so the engine degrades
+    gracefully on a database that has not been migrated yet: leads are still
+    re-checked and refreshed, only the timestamp is skipped.
+    """
+    global _HAS_LAST_CHECKED_AT
+    if _HAS_LAST_CHECKED_AT is None:
+        rows = db.table("leads").select("*").limit(1).execute().data or []
+        # An empty table proves nothing — assume the column is there.
+        _HAS_LAST_CHECKED_AT = True if not rows else "last_checked_at" in rows[0]
+        if not _HAS_LAST_CHECKED_AT:
+            print("[warn] public.leads.last_checked_at is missing — run migration_6a.sql")
+    return _HAS_LAST_CHECKED_AT
+
+
+def _update_lead(db: Client, lead_id: str, values: dict) -> None:
+    """Write fresh values into one leads row (no-op when the row is gone)."""
+    db.table("leads").update(values).eq("id", lead_id).execute()
+
+
+def _bank(db: Client, user_id: str, count: int, exclude: set[str] | None = None) -> list[dict]:
+    """Step A: up to `count` accepted leads this user has NOT received yet.
+
+    `exclude` holds usernames already handled in this run — they are still
+    'accepted' and not delivered, so they have to be skipped explicitly.
+    """
     delivered = db.table("deliveries").select("lead_id").eq("user_id", user_id).execute().data or []
     delivered_ids = [row["lead_id"] for row in delivered]
+    skip = exclude or set()
 
-    query = db.table("leads").select("*").eq("status", "accepted").order("found_at").limit(count)
+    # The limit must leave room for the excluded rows: they are filtered out
+    # server-side, so a plain limit(count) would return too few rows.
+    query = (
+        db.table("leads").select("*")
+        .eq("status", "accepted").order("found_at").limit(count + len(skip))
+    )
     if delivered_ids:  # "not in" fails on an empty list — only filter when needed
         query = query.not_.in_("id", delivered_ids)
+    if skip:
+        query = query.not_.in_("username", sorted(skip))
     rows = query.execute().data or []
     print(f"[bank] {len(rows)} accepted leads not yet received by user {user_id[:8]}…")
-    return rows
+    return rows[:count]
+
+
+def _recheck_leads(db: Client, rows: list[dict]) -> tuple[list[dict], int]:
+    """Re-check bank leads with Apify and refresh their rows.
+
+    `fetch_profiles` sends the usernames in batches of up to 100 — exactly one
+    Apify run per batch. For every lead the fresh followers, bio and privacy
+    flag are written back to the leads table, together with last_checked_at.
+    The fresh profile is then run through `passes_filters`: a lead that no
+    longer passes (followers over the limit, a private account, or no data
+    returned at all) is marked 'rejected' and is NOT returned.
+
+    Returns (kept_leads, dropped_count).
+    """
+    usernames = [row["username"] for row in rows]
+    profiles = fetch_profiles(usernames)  # one Apify run per batch of <= 100
+    fresh = {profile["username"]: profile for profile in profiles}
+
+    stamp = _now_iso()                       # one timestamp for the whole batch
+    has_stamp = _has_last_checked_at(db)    # False until migration_6a is run
+
+    kept: list[dict] = []
+    dropped = 0
+    for row in rows:
+        profile = fresh.get(row["username"])
+        if profile is None:
+            # No profile back from the actor — the lead cannot be delivered.
+            reason = "profile missing or no data returned on re-check"
+            values: dict = {"status": "rejected", "reject_reason": reason}
+            if has_stamp:
+                values["last_checked_at"] = stamp
+            _update_lead(db, row["id"], values)
+            dropped += 1
+            print(f"[recheck] {row['username']}: dropped — {reason}")
+            continue
+
+        # The stored bio is the only context kept from the discovery snippet;
+        # it carries the signals that made the lead acceptable back then.
+        ok, reason = passes_filters(profile, row.get("bio") or "", MAX_FOLLOWERS)
+        values = {
+            "followers": profile["followers"],
+            "bio": profile["bio"],
+            "is_private": profile["is_private"],
+            "status": "accepted" if ok else "rejected",
+            "reject_reason": None if ok else reason,
+        }
+        if has_stamp:
+            values["last_checked_at"] = stamp
+        _update_lead(db, row["id"], values)
+
+        if ok:
+            kept.append({**row, **values})
+            print(f"[recheck] {row['username']}: kept "
+                  f"(followers {row.get('followers')} -> {profile['followers']})")
+        else:
+            dropped += 1
+            print(f"[recheck] {row['username']}: dropped — {reason} "
+                  f"(followers {row.get('followers')} -> {profile['followers']})")
+    return kept, dropped
 
 
 def _known_usernames(db: Client) -> set[str]:
@@ -67,6 +175,12 @@ def fetch_new_leads(user_id: str, count: int) -> tuple[list[dict], dict]:
     """Return (leads, stats) — exactly `count` leads when possible (partial OK).
 
     Step A serves from the bank of accepted leads the user has not received.
+    Every bank lead is re-checked with Apify first: its row is refreshed
+    (followers, bio, privacy flag, last_checked_at) and a lead that no longer
+    passes the filters is rejected instead of delivered. When the rejections
+    leave the request short, more bank leads are pulled — and re-checked the
+    same way — before the discovery pipeline starts.
+
     Step B runs discovery ROUNDS: each round first collects new candidates in
     parallel Serper searches (5 workers) until target = ceil(needed / 0.25)
     candidates (capped by MAX_APIFY_PROFILES), then scrapes them with as few
@@ -77,17 +191,32 @@ def fetch_new_leads(user_id: str, count: int) -> tuple[list[dict], dict]:
     """
     db = get_db()
     stats: dict[str, int | bool | float] = {
-        "from_bank": 0, "serper_calls": 0, "candidates": 0, "prefiltered_out": 0,
+        "from_bank": 0, "rechecked": 0, "dropped_on_recheck": 0,
+        "serper_calls": 0, "candidates": 0, "prefiltered_out": 0,
         "apify_requested": 0, "apify_returned": 0, "accepted_new": 0,
         "rejected_new": 0, "returned": 0, "stopped_by_limit": False,
         "serper_seconds": 0.0, "apify_seconds": 0.0, "apify_runs": 0,
     }
 
-    # --- Step A: bank first ------------------------------------------------------
-    leads = _bank(db, user_id, count)
+    # --- Step A: bank first, every candidate re-checked with Apify -----------
+    leads: list[dict] = []
+    checked: set[str] = set()   # usernames already re-checked in this run
+
+    while len(leads) < count:
+        need = count - len(leads)
+        bank_rows = _bank(db, user_id, need, exclude=checked)
+        if not bank_rows:
+            break  # the bank is empty (or everything left was already checked)
+        checked.update(row["username"] for row in bank_rows)
+        kept, dropped = _recheck_leads(db, bank_rows)
+        stats["rechecked"] += len(bank_rows)
+        stats["dropped_on_recheck"] += dropped
+        leads.extend(kept[:need])   # extras stay banked (status accepted)
     stats["from_bank"] = len(leads)
+
     if len(leads) >= count:
         stats["returned"] = count
+        print(f"[done] stats: {stats}")
         return leads, stats
 
     known = _known_usernames(db)      # any status — nothing scraped twice
@@ -195,6 +324,11 @@ def fetch_new_leads(user_id: str, count: int) -> tuple[list[dict], dict]:
                     "status": "accepted" if ok else "rejected",
                     "reject_reason": None if ok else reason,
                 })
+            if lead_rows and _has_last_checked_at(db):
+                # Scraped in this run — the data is fresh, so stamp it.
+                stamp = _now_iso()
+                for lead_row in lead_rows:
+                    lead_row["last_checked_at"] = stamp
             stored = _upsert_leads(db, lead_rows)
             accepted_rows = [row for row in stored if row["status"] == "accepted"]
             stats["accepted_new"] += len(accepted_rows)
