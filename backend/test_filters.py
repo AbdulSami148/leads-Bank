@@ -1,10 +1,15 @@
-"""Offline tests for app.filters — 10 hand-written cases, no network calls.
+"""Offline tests for app.filters — 16 hand-written cases, no network calls.
 
 Run from the backend/ folder:  python test_filters.py
 Prints PASS/FAIL per case with the reason, plus a final summary.
 """
 
-from app.filters import parse_followers_from_snippet, passes_filters, snippet_prefilter
+from app.filters import (
+    parse_followers_from_snippet,
+    passes_filters,
+    recheck_filters,
+    snippet_prefilter,
+)
 
 # (label, passed, detail)
 results: list[tuple[str, bool, str]] = []
@@ -77,6 +82,41 @@ ok, reason = passes_filters(
     snippet="artwork showcase",
 )
 check("no e-commerce signal rejected", not ok and "e-commerce" in reason, reason)
+
+# 11. re-check: a lead accepted via its snippet keeps its place even without
+#     a Pakistan / e-commerce signal in the fresh bio
+ok, reason = recheck_filters(
+    {"username": "balance_pakistan", "bio": "A unisex brand offering loungewear & athleisure.",
+     "followers": 9_097, "is_private": False},
+)
+check("re-check keeps a snippet-only lead", ok and reason == "ok", reason)
+
+# 12. re-check: followers over the limit -> reject
+ok, reason = recheck_filters(
+    {"username": "too_big", "bio": "Karachi clothing brand", "followers": 12_000, "is_private": False},
+)
+check("re-check rejects 12,000 followers", not ok and "followers" in reason, reason)
+
+# 13. re-check: private account -> reject
+ok, reason = recheck_filters(
+    {"username": "private_shop", "bio": "Karachi boutique", "followers": 900, "is_private": True},
+)
+check("re-check rejects a private account", not ok and "private" in reason, reason)
+
+# 14. re-check: no profile data / no follower count -> reject
+ok, reason = recheck_filters({})
+check("re-check rejects missing profile data", not ok and "profile data" in reason, reason)
+ok, reason = recheck_filters(
+    {"username": "no_count", "bio": "Karachi bakery", "followers": None, "is_private": False},
+)
+check("re-check rejects None followers", not ok and "followers" in reason, reason)
+
+# 15. re-check: reject signal in the fresh bio -> reject
+ok, reason = recheck_filters(
+    {"username": "lahore_updates", "bio": "Breaking news from Lahore",
+     "followers": 1_500, "is_private": False},
+)
+check("re-check rejects a news page", not ok and "news" in reason, reason)
 
 # extra sanity (not counted as cases): 1.5M and 25,142 parsing, +92/03 phone signals
 assert parse_followers_from_snippet("1.5M followers") == 1_500_000

@@ -5,6 +5,7 @@
  * up or unreachable, instead of a raw error. Renders nothing when idle.
  */
 
+import { Loader2, ServerCrash } from "lucide-react";
 import { useServerStatus } from "@/lib/useServerStatus";
 
 export function ServerStatusBanner() {
@@ -14,14 +15,22 @@ export function ServerStatusBanner() {
 
   if (status === "starting") {
     return (
-      <div className="fixed top-0 left-0 right-0 z-[50] bg-amber-50 border-b border-amber-200 px-4 py-2 text-sm text-amber-800 text-center shadow-sm">
+      <div
+        role="status"
+        className="fixed inset-x-0 top-0 z-[50] flex items-center justify-center gap-2 border-b border-amber-200 bg-amber-50/95 px-4 py-2.5 text-center text-sm font-medium text-amber-800 backdrop-blur"
+      >
+        <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
         Server is starting, please wait up to a minute
       </div>
     );
   }
 
   return (
-    <div className="fixed top-0 left-0 right-0 z-[50] bg-red-50 border-b border-red-200 px-4 py-2 text-sm text-red-800 text-center shadow-sm">
+    <div
+      role="alert"
+      className="fixed inset-x-0 top-0 z-[50] flex items-center justify-center gap-2 border-b border-rose-200 bg-rose-50/95 px-4 py-2.5 text-center text-sm font-medium text-rose-800 backdrop-blur"
+    >
+      <ServerCrash className="h-4 w-4" aria-hidden />
       Server is not responding, please try again in a minute
     </div>
   );

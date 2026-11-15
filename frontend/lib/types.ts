@@ -10,6 +10,8 @@ export type JobStatus = "running" | "done" | "failed";
 export interface Profile {
   id: string;
   email?: string | null;
+  /** Display name ("Ali Khan") — letters and single spaces, 2-30 characters. */
+  username?: string | null;
   role: string;
   status: AccountStatus;
   daily_quota: number;
@@ -62,6 +64,7 @@ export interface SheetInfo {
 export interface SignupOut {
   id: string;
   email?: string | null;
+  username?: string | null;
   status: AccountStatus;
 }
 

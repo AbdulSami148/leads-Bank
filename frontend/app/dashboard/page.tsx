@@ -5,30 +5,32 @@
  * - pending:   "Waiting for approval" card, Refresh button + auto re-check
  *              every 30 seconds; switches to the active view on approval.
  * - suspended: "Account suspended" card, no actions.
- * - active:    quota card with progress bar, Get Lead button, 5s polling while
- *              a job runs and a live countdown while locked.
+ * - active:    quota hero card with a progress ring, Get Lead button, 5s
+ *              polling while a job runs and a live countdown while locked.
  * All data comes from the backend API; Supabase is only used for the session.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { ExternalLink, RefreshCw, Sparkles, User } from "lucide-react";
 import { ApiError, getMe, getStatus, getSheetInfo, postGetLeads } from "@/lib/api";
 import { wakeBackend } from "@/lib/api";
 import { formatCountdown } from "@/lib/format";
 import { useSessionGuard } from "@/lib/session";
 import type { AccountStatus, LeadStatus, SheetInfo } from "@/lib/types";
-import { TopBar } from "@/components/topbar";
-import { Button, Card, Skeleton } from "@/components/ui";
 import { SheetLinkForm } from "@/components/sheet-link-form";
+import {
+  Alert,
+  Button,
+  Card,
+  CardHeader,
+  ProgressBar,
+  ProgressRing,
+  Skeleton,
+} from "@/components/ui";
 
 type Notice = { text: string; kind: "info" | "success" | "error" } | null;
-
-const NOTICE_STYLES: Record<"info" | "success" | "error", string> = {
-  info: "text-gray-600",
-  success: "text-green-600",
-  error: "text-red-600",
-};
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -198,6 +200,10 @@ export default function DashboardPage() {
       setNotice({ text: "Finding leads, this takes 1 to 3 minutes", kind: "info" });
     } catch (error) {
       if (error instanceof ApiError) {
+        if (error.status === 401) {
+          router.replace("/login"); // session expired
+          return;
+        }
         if (error.status === 429) {
           setNotice({ text: "Daily quota used up — try again after the countdown.", kind: "error" });
           await refreshStatus(); // picks up locked_until for the countdown
@@ -222,171 +228,220 @@ export default function DashboardPage() {
   // --- render ------------------------------------------------------------------
 
   if (!ready) {
-    // The guard redirects when not allowed; show skeletons while it works.
+    // The guard redirects when not allowed; the layout frame shows skeletons
+    // for the chrome — these fill the page area while the profile loads.
     return (
-      <main className="min-h-screen">
-        <TopBar showUsers={false} current="dashboard" />
-        <div className="mx-auto max-w-md px-4 py-10">
-          <Card className="p-6">
-            <Skeleton className="h-10 w-40" />
-            <Skeleton className="mt-4 h-2 w-full" />
-            <Skeleton className="mt-6 h-12 w-full" />
-          </Card>
-        </div>
-      </main>
+      <div className="space-y-6">
+        <Card className="p-6 sm:p-8">
+          <div className="flex flex-col items-center gap-8 sm:flex-row">
+            <Skeleton className="h-[168px] w-[168px] rounded-full" />
+            <div className="w-full space-y-4">
+              <Skeleton className="h-6 w-48" />
+              <Skeleton className="h-4 w-full max-w-sm" />
+              <Skeleton className="h-12 w-full max-w-xs" />
+            </div>
+          </div>
+        </Card>
+        <Card className="p-6">
+          <Skeleton className="h-5 w-40" />
+          <Skeleton className="mt-4 h-10 w-full" />
+        </Card>
+      </div>
     );
   }
 
   const busy = running || starting;
   const hasSheet = !!sheetInfo?.sheet_url;
-  const buttonDisabled = busy || !hasSheet || (status ? !status.quota.can_request : true);
   const quota = status?.quota;
+  const buttonDisabled = busy || !hasSheet || (quota ? !quota.can_request : true);
 
   return (
-    <main className="min-h-screen">
-      <TopBar
-        showUsers={profile?.role === "admin"}
-        current="dashboard"
-        email={profile?.email}
-      />
+    <>
+      {/* pending: waiting for approval, auto re-checked every 30s */}
+      {accountStatus === "pending" && (
+        <Card className="animate-slide-up space-y-4 p-8 text-center">
+          <span className="inline-flex items-center rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-200/70">
+            Waiting for approval
+          </span>
+          <p className="mx-auto max-w-md text-sm text-slate-600">
+            Your account is being reviewed. You will get access once the admin
+            approves it.
+          </p>
+          <Button
+            variant="secondary"
+            loading={rechecking}
+            onClick={() => void recheckApproval()}
+            className="mx-auto"
+          >
+            <RefreshCw className="h-4 w-4" aria-hidden />
+            Refresh
+          </Button>
+        </Card>
+      )}
 
-      <div className="mx-auto max-w-md px-4 py-10">
-        {/* pending: waiting for approval, auto re-checked every 30s */}
-        {accountStatus === "pending" && (
-          <Card className="space-y-4 p-6 text-center">
-            <span className="inline-flex items-center rounded-full bg-amber-100 px-3 py-1 text-xs font-medium text-amber-800">
-              Waiting for approval
+      {/* suspended: no actions available */}
+      {accountStatus === "suspended" && (
+        <Card className="animate-slide-up space-y-3 p-8 text-center">
+          <span className="inline-flex items-center rounded-full bg-rose-50 px-3 py-1 text-xs font-medium text-rose-700 ring-1 ring-inset ring-rose-200/70">
+            Account suspended
+          </span>
+          <p className="text-sm text-slate-600">Account suspended — please contact the admin.</p>
+        </Card>
+      )}
+
+      {/* active: the normal dashboard */}
+      {accountStatus === "active" && (
+        <div className="space-y-6">
+          {/* welcome greeting */}
+          <div className="flex items-center gap-3 rounded-xl bg-indigo-50 px-5 py-4 border border-indigo-100">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700">
+              <User className="h-5 w-5" aria-hidden />
             </span>
-            <p className="text-gray-600">
-              Your account is being reviewed. You will get access once the admin
-              approves it.
-            </p>
-            <Button variant="secondary" loading={rechecking} onClick={() => void recheckApproval()}>
-              Refresh
-            </Button>
-          </Card>
-        )}
-
-        {/* suspended: no actions available */}
-        {accountStatus === "suspended" && (
-          <Card className="space-y-3 p-6 text-center">
-            <span className="inline-flex items-center rounded-full bg-red-100 px-3 py-1 text-xs font-medium text-red-700">
-              Account suspended
-            </span>
-            <p className="text-gray-600">Account suspended, contact the admin.</p>
-          </Card>
-        )}
-
-        {/* active: the normal dashboard */}
-        {accountStatus === "active" && (
-          <Card className="space-y-5 p-6">
-            {/* Google Sheet link (above the quota card until a sheet is linked) */}
-            {sheetLoading ? (
-              <div className="space-y-3">
-                <Skeleton className="h-10 w-44" />
-                <Skeleton className="h-2 w-full" />
-              </div>
-            ) : sheetError ? (
-              <p className="text-sm text-red-600">
-                {sheetError}{" "}
-                <span
-                  onClick={() => void refreshSheetInfo()}
-                  className="underline cursor-pointer"
-                >
-                  Retry
-                </span>
+            <div>
+              <p className="text-sm font-medium text-slate-900">
+                Welcome back, {profile?.username ?? profile?.email?.split("@")[0] ?? "there"}!
               </p>
-            ) : !sheetInfo?.sheet_url || showLinkForm ? (
-              <SheetLinkForm
-                token={token!}
-                serviceAccountEmail={sheetInfo?.service_account_email ?? ""}
-                onLinked={handleSheetLinked}
-              />
-            ) : (
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                <span className="text-sm text-gray-600">Sheet connected</span>
-                <div className="flex items-center gap-2">
-                  <Link
-                    href={sheetInfo.sheet_url!}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-sm text-blue-600 hover:underline"
-                  >
-                    Open sheet
-                  </Link>
-                  <Button
-                    variant="secondary"
-                    className="px-2 py-1 text-xs"
-                    onClick={() => setShowLinkForm(true)}
-                  >
-                    Change sheet
-                  </Button>
-                </div>
-              </div>
-            )}
+              <p className="text-xs text-slate-500">
+                Fresh leads are checked one by one and delivered straight into your Google Sheet.
+              </p>
+            </div>
+          </div>
 
-            {/* quota + progress bar (used / daily quota) */}
-            {quota ? (
-              <>
+          {/* quota hero */}
+          <Card className="animate-slide-up overflow-hidden">
+            <div className="grid gap-8 p-6 sm:p-8 md:grid-cols-[auto,1fr] md:items-center">
+              <div className="flex justify-center">
+                {quota ? (
+                  <ProgressRing value={quota.leads_today} max={quota.daily_quota} size={168} stroke={14}>
+                    <span className="text-4xl font-semibold tracking-tight text-slate-900">
+                      {quota.remaining}
+                    </span>
+                    <span className="mt-0.5 text-xs font-medium text-slate-500">
+                      of {quota.daily_quota} left today
+                    </span>
+                  </ProgressRing>
+                ) : (
+                  <Skeleton className="h-[168px] w-[168px] rounded-full" />
+                )}
+              </div>
+
+              <div className="space-y-5">
                 <div>
-                  <p className="text-sm text-gray-500">Remaining leads</p>
-                  <p className="text-3xl font-semibold">
-                    {quota.remaining} <span className="text-lg text-gray-400">/ {quota.daily_quota}</span>
+                  <h1 className="text-xl font-semibold tracking-tight text-slate-900">
+                    Your daily quota
+                  </h1>
+                  <p className="mt-1 text-sm text-slate-500">
+                    Fresh leads are checked one by one and delivered straight into your
+                    Google Sheet.
                   </p>
                 </div>
-                <div>
-                  <div className="flex justify-between text-xs text-gray-500">
-                    <span>Used today: {quota.leads_today}</span>
-                    <span>Quota: {quota.daily_quota}</span>
-                  </div>
-                  <div className="mt-1 h-2 rounded-full bg-gray-100">
-                    <div
-                      className="h-2 rounded-full bg-blue-600 transition-all"
-                      style={{
-                        width: `${Math.min(100, Math.round((quota.leads_today / Math.max(1, quota.daily_quota)) * 100))}%`,
-                      }}
+
+                {quota && (
+                  <div>
+                    <ProgressBar
+                      value={quota.leads_today}
+                      max={quota.daily_quota}
+                      tone={quota.remaining === 0 ? "amber" : "indigo"}
                     />
+                    <p className="mt-2 text-xs text-slate-500">
+                      Used today: {quota.leads_today} · Daily quota: {quota.daily_quota}
+                    </p>
+                  </div>
+                )}
+
+                {/* running / locked / success / failed states */}
+                {busy && (
+                  <Alert kind="info">
+                    <span className="inline-flex items-center gap-2">
+                      <span
+                        className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent"
+                        aria-hidden
+                      />
+                      Finding leads — this takes 1 to 3 minutes
+                    </span>
+                  </Alert>
+                )}
+                {!busy && notice && <Alert kind={notice.kind}>{notice.text}</Alert>}
+                {!busy && status && !status.quota.can_request && countdown && (
+                  <Alert kind="warning">Next leads in {countdown}</Alert>
+                )}
+                {!busy && !sheetLoading && !hasSheet && (
+                  <Alert kind="warning">Link your Google Sheet first</Alert>
+                )}
+
+                <Button
+                  size="lg"
+                  className="w-full sm:w-auto"
+                  loading={busy}
+                  disabled={buttonDisabled}
+                  onClick={handleGetLeads}
+                >
+                  <Sparkles className="h-4 w-4" aria-hidden />
+                  {busy ? "Finding leads…" : "Get Lead"}
+                </Button>
+              </div>
+            </div>
+          </Card>
+
+          {/* Google Sheet connection */}
+          <Card className="animate-slide-up p-6 sm:p-7">
+            <CardHeader
+              title="Google Sheet"
+              description="Every delivered lead is appended to this spreadsheet."
+            />
+
+            <div className="mt-5">
+              {sheetLoading ? (
+                <div className="space-y-3">
+                  <Skeleton className="h-6 w-44" />
+                  <Skeleton className="h-4 w-full max-w-md" />
+                </div>
+              ) : sheetError ? (
+                <Alert kind="error">
+                  {sheetError}{" "}
+                  <button
+                    type="button"
+                    onClick={() => void refreshSheetInfo()}
+                    className="font-medium underline underline-offset-2"
+                  >
+                    Retry
+                  </button>
+                </Alert>
+              ) : !sheetInfo?.sheet_url || showLinkForm ? (
+                <SheetLinkForm
+                  token={token!}
+                  serviceAccountEmail={sheetInfo?.service_account_email ?? ""}
+                  onLinked={handleSheetLinked}
+                />
+              ) : (
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="flex items-center gap-2 text-sm font-medium text-emerald-700">
+                      <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden />
+                      Sheet connected
+                    </p>
+                    <p className="mt-1 truncate text-xs text-slate-500">{sheetInfo.sheet_url}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Link
+                      href={sheetInfo.sheet_url!}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-medium text-indigo-600 transition hover:bg-indigo-50 hover:text-indigo-700"
+                    >
+                      <ExternalLink className="h-4 w-4" aria-hidden />
+                      Open sheet
+                    </Link>
+                    <Button variant="secondary" size="sm" onClick={() => setShowLinkForm(true)}>
+                      Change sheet
+                    </Button>
                   </div>
                 </div>
-              </>
-            ) : (
-              <div className="space-y-3">
-                <Skeleton className="h-10 w-44" />
-                <Skeleton className="h-2 w-full" />
-              </div>
-            )}
-
-            {/* status area: running / success / failed / locked */}
-            {busy && (
-              <p className="flex items-center gap-2 text-sm text-gray-600">
-                <span
-                  className="h-4 w-4 animate-spin rounded-full border-2 border-blue-600 border-t-transparent"
-                  aria-hidden
-                />
-                Finding leads, this takes 1 to 3 minutes
-              </p>
-            )}
-            {!busy && notice && <p className={`text-sm ${NOTICE_STYLES[notice.kind]}`}>{notice.text}</p>}
-            {status && !status.quota.can_request && countdown && (
-              <p className="text-sm font-medium text-amber-600">Next leads in {countdown}</p>
-            )}
-
-            {!busy && !sheetLoading && !hasSheet && (
-              <p className="text-sm text-gray-500">Link your Google Sheet first</p>
-            )}
-
-            {/* prominent Get Lead button — disabled while running or locked */}
-            <Button
-              className="w-full py-3 text-base"
-              loading={busy}
-              disabled={buttonDisabled}
-              onClick={handleGetLeads}
-            >
-              Get Lead
-            </Button>
-          </Card>
-        )}
-      </div>
-    </main>
+              )}
+        </div>
+      </Card>
+        </div>
+      )}
+    </>
   );
 }

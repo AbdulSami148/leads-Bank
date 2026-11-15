@@ -8,6 +8,12 @@ the admin approves with daily_quota=2 (no real job is run), /admin/users/{id}/ac
 returns profile + quota_state + jobs + daily, and a normal user gets 403 on
 admin endpoints. All test users are deleted in a finally block.
 
+Also covered: the display name (username) and the self-service email change —
+signup without a username or with an invalid one is rejected (422), a valid
+username is stored and returned by /me, PATCH /me updates it, and
+POST /me/change-email needs the current password (400), refuses an email that
+is already taken (409) and otherwise moves the account to the new address.
+
 Note: the backend rate-limits signups (5 per IP per hour, duplicates included),
 so re-running this test several times within an hour can hit that limit.
 """
@@ -59,8 +65,12 @@ def main() -> None:
     user_email = f"test_signup_user_{suffix}@example.com"
     password = "SignupTest!234"
     admin_email = f"test_signup_admin_{suffix}@example.com"
+    username = "Ali Khan"            # valid display name
+    new_username = "Ali Khan Junior"  # valid display name for PATCH /me
     user_id: Any = None
     admin_id: Any = None
+    named_user_id: Any = None  # the user created in step l
+    named_email = f"test_signup_named_{suffix}@example.com"
 
     try:
         # --- setup: fresh admin (service key), promoted via profiles.role ------
@@ -74,7 +84,7 @@ def main() -> None:
         # --- a. signup -> 201, login works, /me shows status 'pending' ---------
         r = requests.post(
             f"{BASE_URL}/auth/signup",
-            json={"email": user_email, "password": password},
+            json={"email": user_email, "password": password, "username": username},
             timeout=30,
         )
         body = r.json() if r.status_code == 201 else {}
@@ -110,14 +120,14 @@ def main() -> None:
         # --- c. duplicate signup -> 409; bad input rejected ---------------------
         r = requests.post(
             f"{BASE_URL}/auth/signup",
-            json={"email": user_email, "password": password},
+            json={"email": user_email, "password": password, "username": username},
             timeout=30,
         )
         check("c. duplicate signup -> 409", r.status_code == 409, f"status {r.status_code}", body=r.text)
 
         r = requests.post(
             f"{BASE_URL}/auth/signup",
-            json={"email": f"short_{suffix}@example.com", "password": "short"},
+            json={"email": f"short_{suffix}@example.com", "password": "short", "username": username},
             timeout=30,
         )
         check(
@@ -129,7 +139,7 @@ def main() -> None:
 
         r = requests.post(
             f"{BASE_URL}/auth/signup",
-            json={"email": "not-an-email", "password": password},
+            json={"email": "not-an-email", "password": password, "username": username},
             timeout=30,
         )
         check(
@@ -212,9 +222,167 @@ def main() -> None:
             check(f"g. GET {path} as normal user -> 403", r.status_code == 403,
                   f"status {r.status_code}", body=r.text)
 
+        # --- h. signup without a username -> 422 --------------------------------
+        r = requests.post(
+            f"{BASE_URL}/auth/signup",
+            json={"email": f"nouser_{suffix}@example.com", "password": password},
+            timeout=30,
+        )
+        check(
+            "h. signup without username -> 422",
+            r.status_code == 422,
+            f"status {r.status_code}",
+            body=r.text,
+        )
+
+        # --- i. username with digits -> 422 -------------------------------------
+        r = requests.post(
+            f"{BASE_URL}/auth/signup",
+            json={"email": f"digits_{suffix}@example.com", "password": password,
+                  "username": "Ali2"},
+            timeout=30,
+        )
+        check(
+            "i. username with digits -> 422",
+            r.status_code == 422,
+            f"status {r.status_code}",
+            body=r.text,
+        )
+
+        # --- j. username with symbols -> 422 ------------------------------------
+        r = requests.post(
+            f"{BASE_URL}/auth/signup",
+            json={"email": f"symbols_{suffix}@example.com", "password": password,
+                  "username": "Ali_Khan"},
+            timeout=30,
+        )
+        check(
+            "j. username with symbols -> 422",
+            r.status_code == 422,
+            f"status {r.status_code}",
+            body=r.text,
+        )
+
+        # --- k. a valid username is accepted and returned by /me -----------------
+        r = requests.post(
+            f"{BASE_URL}/auth/signup",
+            json={"email": named_email, "password": password, "username": username},
+            timeout=30,
+        )
+        named_body = r.json() if r.status_code == 201 else {}
+        named_user_id = named_body.get("id")
+        check(
+            "k. signup with a valid username -> 201",
+            r.status_code == 201,
+            f"status {r.status_code}, {named_body}",
+            body=r.text,
+        )
+        if named_user_id:
+            try:
+                named_token = login(named_email, password)
+            except Exception as exc:
+                named_token = ""
+                check("k. login after signup with a username", False, str(exc))
+            named_me = requests.get(
+                f"{BASE_URL}/me", headers={"Authorization": f"Bearer {named_token}"}, timeout=30
+            )
+            named_profile = named_me.json() if named_me.status_code == 200 else {}
+            check(
+                "k. /me returns the username",
+                named_profile.get("username") == username,
+                f"username {named_profile.get('username')!r}"
+                + ("" if named_profile.get("username") == username
+                   else " (is migration_7a.sql applied?)"),
+                body=named_me.text,
+            )
+
+        # --- l. PATCH /me updates the username ---------------------------------
+        r = requests.patch(
+            f"{BASE_URL}/me", headers=user_headers, json={"username": new_username}, timeout=30
+        )
+        patched = r.json() if r.status_code == 200 else {}
+        check(
+            "l. PATCH /me updates the username -> 200",
+            r.status_code == 200 and patched.get("username") == new_username,
+            f"status {r.status_code}, username {patched.get('username')!r}"
+            + ("" if patched.get("username") == new_username
+               else " (is migration_7a.sql applied?)"),
+            body=r.text,
+        )
+
+        # --- m. PATCH /me rejects a username with digits ------------------------
+        r = requests.patch(
+            f"{BASE_URL}/me", headers=user_headers, json={"username": "Ali2"}, timeout=30
+        )
+        check(
+            "m. PATCH /me with digits -> 422",
+            r.status_code == 422,
+            f"status {r.status_code}",
+            body=r.text,
+        )
+
+        # --- n. change-email with a wrong password -> 400 -----------------------
+        r = requests.post(
+            f"{BASE_URL}/me/change-email",
+            headers=user_headers,
+            json={"current_password": "definitely-wrong", "new_email": f"changed_{suffix}@example.com"},
+            timeout=30,
+        )
+        detail = r.json().get("detail") if r.status_code == 400 else None
+        check(
+            "n. change-email with a wrong password -> 400",
+            r.status_code == 400 and detail == "Current password is incorrect",
+            f"status {r.status_code}, detail {detail!r}",
+            body=r.text,
+        )
+
+        # --- o. change-email with an email that is already taken -> 409 ---------
+        r = requests.post(
+            f"{BASE_URL}/me/change-email",
+            headers=user_headers,
+            json={"current_password": password, "new_email": admin_email},
+            timeout=30,
+        )
+        check(
+            "o. change-email with a taken email -> 409",
+            r.status_code == 409,
+            f"status {r.status_code}, body {r.text[:120]}",
+            body=r.text,
+        )
+
+        # --- p. change-email succeeds; new email works, old one does not --------
+        new_email = f"changed_{suffix}@example.com"
+        r = requests.post(
+            f"{BASE_URL}/me/change-email",
+            headers=user_headers,
+            json={"current_password": password, "new_email": new_email},
+            timeout=30,
+        )
+        changed = r.json() if r.status_code == 200 else {}
+        check(
+            "p. change-email with the correct password -> 200",
+            r.status_code == 200 and changed.get("email") == new_email,
+            f"status {r.status_code}, email {changed.get('email')!r}",
+            body=r.text,
+        )
+        try:
+            new_token = login(new_email, password)
+            check("p. login with the new email works", bool(new_token), "")
+        except Exception as exc:
+            check("p. login with the new email works", False, str(exc))
+        try:
+            login(user_email, password)
+            check("p. login with the old email fails", False, "the old email still works")
+        except Exception:
+            check("p. login with the old email fails", True, "")
+
     finally:
-        # --- h. cleanup: delete both test users even on failure -----------------
-        for uid, email in ((admin_id, admin_email), (user_id, user_email)):
+        # --- cleanup: delete every test user even on failure --------------------
+        for uid, email in (
+            (admin_id, admin_email),
+            (user_id, user_email),
+            (named_user_id, named_email),
+        ):
             if uid:
                 try:
                     service.auth.admin.delete_user(uid)

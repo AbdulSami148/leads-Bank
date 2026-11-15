@@ -5,9 +5,11 @@ Run from the backend/ folder (needs SUPABASE_* and APIFY_* in .env):
     python test_recheck.py
 
 What it does:
-  1. Picks the first 3 accepted leads of the bank — the exact rows the engine
-     serves (same order: oldest first) — and overwrites their stored follower
-     count with a deliberately wrong value (1).
+  1. Seeds LEAD_COUNT known accepted bank leads with a deliberately wrong
+     follower count (1). One of them is BALANCE_LEAD — a genuine Pakistani
+     lead that was accepted thanks to its discovery snippet; it must survive
+     the re-check. Another one gets TOO_MANY_FOLLOWERS (12000) injected into
+     its fresh Apify data — it must be dropped.
   2. Creates a throwaway test user and runs the engine for 3 leads.
   3. Prints, per seeded lead: the old follower count, the fresh follower count
      and whether the lead was kept (delivered) or dropped.
@@ -28,15 +30,18 @@ load_dotenv(os.path.join(BACKEND_DIR, ".env"))   # must run before app imports
 sys.path.insert(0, BACKEND_DIR)
 sys.stdout.reconfigure(encoding="utf-8")          # bios/usernames may be unicode
 
-from app.db import get_db                                   # noqa: E402
-from app.lead_engine import fetch_new_leads                 # noqa: E402
+import app.lead_engine as lead_engine                          # noqa: E402
+from app.db import get_db                                     # noqa: E402
+from app.lead_engine import fetch_new_leads                   # noqa: E402
 
 LEAD_COUNT = 3          # leads the engine is asked for
 WRONG_FOLLOWERS = 1     # the deliberately wrong follower count stored in the bank
+BALANCE_LEAD = "balance_pakistan"   # accepted earlier via its snippet — must be kept
+TOO_MANY_FOLLOWERS = 12000           # fresh follower count that must be dropped
 
 # The seeded leads are moved to the front of the bank (oldest first), because
 # several bank rows share the same found_at timestamp — without this the
-# "first 3 leads" cut is not reproducible. found_at is restored afterwards.
+# "first N leads" cut is not reproducible. found_at is restored afterwards.
 SEED_FOUND_AT = "2000-01-01T00:00:00+00:00"
 
 # Fields the test snapshots and restores (last_checked_at only exists after
@@ -84,16 +89,31 @@ def restore_leads(db: Any, snapshot: dict[str, dict]) -> int:
     return restored
 
 
-def seed_leads(db: Any, count: int) -> list[dict]:
-    """Overwrite the follower count of the first `count` accepted bank leads.
-
-    These are the rows the engine pulls (it serves the accepted leads oldest
-    first), so the wrong follower count is guaranteed to be seen by the run.
-    """
+def pick_leads(db: Any, count: int) -> list[dict]:
+    """Pick the bank leads to seed: BALANCE_LEAD first, then the next accepted ones."""
     rows = (
         db.table("leads").select("id,username,followers")
-        .eq("status", "accepted").order("found_at").limit(count).execute().data or []
+        .eq("status", "accepted").order("found_at").execute().data or []
     )
+    picked: list[dict] = []
+    balance = next((row for row in rows if row["username"] == BALANCE_LEAD), None)
+    if balance:
+        picked.append(balance)
+    for row in rows:
+        if len(picked) >= count:
+            break
+        if row["username"] == BALANCE_LEAD:
+            continue
+        picked.append(row)
+    return picked[:count]
+
+
+def seed_leads(db: Any, rows: list[dict]) -> list[dict]:
+    """Overwrite the stored follower count of the given leads with a wrong value.
+
+    The rows are moved to the front of the bank, so the engine pulls exactly
+    these leads first and the wrong follower count is guaranteed to be seen.
+    """
     for row in rows:
         db.table("leads").update({
             "followers": WRONG_FOLLOWERS,
@@ -110,16 +130,36 @@ def main() -> None:
     seeded: list[dict] = []
     user_id: Optional[str] = None
     user_email = f"test_recheck_{uuid.uuid4().hex[:8]}@example.com"
+    real_fetch_profiles = lead_engine.fetch_profiles
 
     try:
-        # --- setup: 3 known accepted leads with a wrong follower count -------
-        seeded = seed_leads(db, LEAD_COUNT)
+        # --- setup: known accepted leads with a wrong follower count ----------
+        seeded = seed_leads(db, pick_leads(db, LEAD_COUNT))
         if not check(
             f"seeded {LEAD_COUNT} accepted leads with followers={WRONG_FOLLOWERS}",
             len(seeded) == LEAD_COUNT,
             f"got {len(seeded)}",
         ):
             return
+
+        balance_rows = [row for row in seeded if row["username"] == BALANCE_LEAD]
+        if not balance_rows:
+            print(f"[warn] {BALANCE_LEAD} is not in the bank — that case is skipped")
+        # The last seeded lead gets too many followers in its fresh data.
+        too_many_row = seeded[-1]
+        if too_many_row["username"] == BALANCE_LEAD:
+            too_many_row = seeded[0]
+
+        # --- setup: inject TOO_MANY_FOLLOWERS into that lead's fresh data -----
+        def patched_fetch_profiles(usernames: list[str]) -> list[dict]:
+            """Real Apify data, except the one lead that grew past the limit."""
+            profiles = real_fetch_profiles(usernames)
+            for profile in profiles:
+                if profile["username"] == too_many_row["username"]:
+                    profile["followers"] = TOO_MANY_FOLLOWERS
+            return profiles
+
+        lead_engine.fetch_profiles = patched_fetch_profiles
 
         # --- setup: throwaway test user (deleted in the cleanup) --------------
         created = db.auth.admin.create_user({
@@ -129,6 +169,8 @@ def main() -> None:
         })
         user_id = created.user.id
         print(f"[setup] test user {user_email} ({user_id})")
+        print(f"[setup] {too_many_row['username']} will report {TOO_MANY_FOLLOWERS} "
+              f"fresh followers")
 
         # --- run the engine for 3 leads ---------------------------------------
         leads, stats = fetch_new_leads(user_id, LEAD_COUNT)
@@ -173,6 +215,28 @@ def main() -> None:
                     f"delivered {delivered_lead.get('followers')} vs db {fresh_followers}",
                 )
 
+        # The genuine lead accepted via its snippet must survive the re-check.
+        if balance_rows:
+            after = current.get(balance_rows[0]["id"], {})
+            check(
+                f"{BALANCE_LEAD}: kept after the re-check (snippet-only lead)",
+                BALANCE_LEAD in delivered,
+                f"followers {after.get('followers')}, status {after.get('status')}",
+            )
+            check(
+                f"{BALANCE_LEAD}: still accepted in the DB",
+                after.get("status") == "accepted",
+                f"status {after.get('status')}, reason {after.get('reject_reason')}",
+            )
+
+        # The lead that grew past the follower limit must be dropped.
+        after = current.get(too_many_row["id"], {})
+        check(
+            f"{too_many_row['username']}: dropped (fresh followers {TOO_MANY_FOLLOWERS})",
+            too_many_row["username"] not in delivered and after.get("status") == "rejected",
+            f"status {after.get('status')}, reason {after.get('reject_reason')}",
+        )
+
         check(
             "every delivered lead carries a fresh follower count",
             all(isinstance(lead.get("followers"), int) and lead["followers"] != WRONG_FOLLOWERS
@@ -185,6 +249,11 @@ def main() -> None:
             f"rechecked={stats.get('rechecked')}, dropped_on_recheck={stats.get('dropped_on_recheck')}",
         )
         check(
+            "engine counted the drop (stats.dropped_on_recheck > 0)",
+            int(stats.get("dropped_on_recheck") or 0) > 0,
+            f"dropped_on_recheck={stats.get('dropped_on_recheck')}",
+        )
+        check(
             "engine delivered at most the requested number of leads",
             len(leads) <= LEAD_COUNT,
             f"delivered {len(leads)} of {LEAD_COUNT}",
@@ -192,6 +261,7 @@ def main() -> None:
 
     finally:
         # --- cleanup: restore the lead rows and delete the test user ----------
+        lead_engine.fetch_profiles = real_fetch_profiles
         restored = restore_leads(db, snapshot)
         print(f"\n[cleanup] restored {restored} lead row(s)")
         if user_id:

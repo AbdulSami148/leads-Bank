@@ -4,7 +4,7 @@ import { useCallback, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { useToast } from "@/components/toast";
 import { ApiError, postSheetLink } from "@/lib/api";
-import { Button, Card } from "@/components/ui";
+import { Button } from "@/components/ui";
 
 interface SheetLinkFormProps {
   /** Supabase access token for the API call. */
@@ -85,31 +85,35 @@ export function SheetLinkForm({
   );
 
   return (
-    <Card className="space-y-4 p-6">
-      <h2 className="text-lg font-semibold">Connect your Google Sheet</h2>
-      <ol className="list-decimal list-inside space-y-4 text-sm text-gray-600 divide-y divide-gray-200">
-        <li className="py-2">
-          <span className="font-medium">Step 1:</span> Create a new Google Sheet.
+    <div className="space-y-4">
+      <ol className="space-y-4 text-sm text-slate-600">
+        <li className="flex gap-3">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-xs font-semibold text-indigo-700">
+            1
+          </span>
+          <span>Create a new Google Sheet.</span>
         </li>
-        <li className="py-2 flex flex-col sm:flex-row sm:items-start sm:gap-3 gap-2">
-          <span className="font-medium shrink-0">Step 2:</span>
-          <p className="text-sm text-gray-600">
+        <li className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-xs font-semibold text-indigo-700">
+            2
+          </span>
+          <p>
             Share it with this email as <span className="font-medium">Editor</span>:
           </p>
-          <div className="flex flex-col sm:flex-row items-center gap-2 mt-1 sm:mt-0 w-full sm:w-auto">
-            <span
-              className="flex-1 min-w-0 break-all rounded border border-gray-200 bg-gray-50 px-3 py-1.5 text-sm text-gray-800"
-            >
+          <div className="flex w-full min-w-0 flex-col items-start gap-2 sm:flex-row sm:items-center">
+            <span className="w-full min-w-0 flex-1 break-all rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
               {serviceAccountEmail}
             </span>
-            <Button variant="secondary" className="px-2 py-1 text-xs" onClick={handleCopy}>
+            <Button variant="secondary" size="sm" onClick={handleCopy}>
               Copy
             </Button>
           </div>
         </li>
-        <li className="py-2 flex flex-col gap-2">
-          <span className="font-medium">Step 3:</span>
-          <form onSubmit={handleLink} className="flex flex-col sm:flex-row sm:gap-2 w-full">
+        <li className="flex flex-col gap-2 sm:flex-row sm:items-start sm:gap-3">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-xs font-semibold text-indigo-700">
+            3
+          </span>
+          <form onSubmit={handleLink} className="flex w-full flex-col gap-2 sm:flex-row">
             <input
               id="sheet-link"
               type="text"
@@ -117,19 +121,20 @@ export function SheetLinkForm({
               value={sheetUrl}
               onChange={(event) => setSheetUrl(event.target.value)}
               disabled={linking}
-              className="flex-1 min-w-0 rounded border border-gray-300 bg-white px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-50 disabled:cursor-not-allowed"
+              aria-label="Google Sheet link"
+              className="w-full min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm shadow-sm transition placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 disabled:cursor-not-allowed disabled:bg-slate-50"
             />
-            <Button
-              type="submit"
-              loading={linking}
-              disabled={linking || !sheetUrl.trim()}
-            >
+            <Button type="submit" loading={linking} disabled={linking || !sheetUrl.trim()}>
               Link sheet
             </Button>
           </form>
-          {linkError && <p className="text-sm text-red-600">{linkError}</p>}
+          {linkError && (
+            <p role="alert" className="text-sm font-medium text-rose-600">
+              {linkError}
+            </p>
+          )}
         </li>
       </ol>
-    </Card>
+    </div>
   );
 }

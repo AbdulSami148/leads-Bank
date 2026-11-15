@@ -5,8 +5,9 @@ mark_delivered. Uses the service-key Supabase client from app.db.
 
 Every delivered lead is verified in the SAME run: bank leads are re-checked
 with Apify (fresh followers, bio, privacy flag) before they are handed out, and
-leads scraped in Step B are fresh by definition. A lead that no longer passes
-the filters is marked 'rejected' and is never delivered.
+leads scraped in Step B are fresh by definition. A bank lead that no longer
+passes the fresh-data checks (follower limit, private account, reject signals)
+is marked 'rejected' and is never delivered.
 
 Discovery is round-based and cost-aware: each round runs Serper searches in
 parallel (5 workers) until enough NEW candidates are collected, then makes
@@ -23,7 +24,12 @@ from supabase import Client
 
 from app.apify_client import fetch_profiles
 from app.db import get_db
-from app.filters import parse_followers_from_snippet, passes_filters, snippet_prefilter
+from app.filters import (
+    parse_followers_from_snippet,
+    passes_filters,
+    recheck_filters,
+    snippet_prefilter,
+)
 from app.serper import build_queries, search_instagram_profiles
 
 BATCH_SIZE: Final[int] = 100           # usernames per Apify run (batches of up to 100)
@@ -99,9 +105,12 @@ def _recheck_leads(db: Client, rows: list[dict]) -> tuple[list[dict], int]:
     `fetch_profiles` sends the usernames in batches of up to 100 — exactly one
     Apify run per batch. For every lead the fresh followers, bio and privacy
     flag are written back to the leads table, together with last_checked_at.
-    The fresh profile is then run through `passes_filters`: a lead that no
-    longer passes (followers over the limit, a private account, or no data
-    returned at all) is marked 'rejected' and is NOT returned.
+    The fresh profile is then checked with `recheck_filters`: only the rules
+    that fresh data can invalidate are applied (follower limit, private
+    account, reject signals) — the Pakistan / e-commerce signals were already
+    decided when the lead was accepted and the discovery snippet is not
+    stored. A lead that no longer passes is marked 'rejected' and is NOT
+    returned.
 
     Returns (kept_leads, dropped_count).
     """
@@ -127,9 +136,8 @@ def _recheck_leads(db: Client, rows: list[dict]) -> tuple[list[dict], int]:
             print(f"[recheck] {row['username']}: dropped — {reason}")
             continue
 
-        # The stored bio is the only context kept from the discovery snippet;
-        # it carries the signals that made the lead acceptable back then.
-        ok, reason = passes_filters(profile, row.get("bio") or "", MAX_FOLLOWERS)
+        # Fresh-data rules only — no snippet is available for a bank lead.
+        ok, reason = recheck_filters(profile, MAX_FOLLOWERS)
         values = {
             "followers": profile["followers"],
             "bio": profile["bio"],
@@ -177,9 +185,9 @@ def fetch_new_leads(user_id: str, count: int) -> tuple[list[dict], dict]:
     Step A serves from the bank of accepted leads the user has not received.
     Every bank lead is re-checked with Apify first: its row is refreshed
     (followers, bio, privacy flag, last_checked_at) and a lead that no longer
-    passes the filters is rejected instead of delivered. When the rejections
-    leave the request short, more bank leads are pulled — and re-checked the
-    same way — before the discovery pipeline starts.
+    passes the fresh-data checks is rejected instead of delivered. When the
+    rejections leave the request short, more bank leads are pulled — and
+    re-checked the same way — before the discovery pipeline starts.
 
     Step B runs discovery ROUNDS: each round first collects new candidates in
     parallel Serper searches (5 workers) until target = ceil(needed / 0.25)

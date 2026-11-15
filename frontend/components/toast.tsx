@@ -6,6 +6,7 @@
  */
 
 import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { AlertCircle, CheckCircle2, Info, X } from "lucide-react";
 
 type ToastKind = "success" | "error" | "info";
 
@@ -26,15 +27,21 @@ export function useToast(): PushToast {
 }
 
 const TOAST_STYLES: Record<ToastKind, string> = {
-  success: "border-green-200 bg-green-50 text-green-800",
-  error: "border-red-200 bg-red-50 text-red-700",
-  info: "border-gray-200 bg-white text-gray-700",
+  success: "border-emerald-200 bg-white text-emerald-900",
+  error: "border-rose-200 bg-white text-rose-900",
+  info: "border-slate-200 bg-white text-slate-800",
 };
 
-const TOAST_ICONS: Record<ToastKind, string> = {
-  success: "✓",
-  error: "!",
-  info: "i",
+const TOAST_ICONS: Record<ToastKind, typeof Info> = {
+  success: CheckCircle2,
+  error: AlertCircle,
+  info: Info,
+};
+
+const TOAST_ICON_COLORS: Record<ToastKind, string> = {
+  success: "text-emerald-600",
+  error: "text-rose-600",
+  info: "text-indigo-600",
 };
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
@@ -54,16 +61,19 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       {children}
       {/* Stacked toasts, top-right, above everything else. */}
       <div className="pointer-events-none fixed right-4 top-4 z-[60] flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2">
-        {toasts.map((toast) => (
-          <div
-            key={toast.id}
-            role="status"
-            className={`pointer-events-auto flex items-start gap-2 rounded-xl border px-3 py-2.5 text-sm shadow-md ${TOAST_STYLES[toast.kind]}`}
-          >
-            <span className="mt-0.5 font-semibold">{TOAST_ICONS[toast.kind]}</span>
-            <span className="min-w-0 break-words">{toast.text}</span>
-          </div>
-        ))}
+        {toasts.map((toast) => {
+          const Icon = TOAST_ICONS[toast.kind];
+          return (
+            <div
+              key={toast.id}
+              role="status"
+              className={`pointer-events-auto flex animate-slide-up items-start gap-2.5 rounded-xl border px-3.5 py-3 text-sm shadow-pop ${TOAST_STYLES[toast.kind]}`}
+            >
+              <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${TOAST_ICON_COLORS[toast.kind]}`} aria-hidden />
+              <span className="min-w-0 break-words">{toast.text}</span>
+            </div>
+          );
+        })}
       </div>
     </ToastContext.Provider>
   );

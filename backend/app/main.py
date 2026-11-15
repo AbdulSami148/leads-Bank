@@ -1,6 +1,7 @@
 """FastAPI entrypoint: CORS, health check, open signup, /me, account gating,
 /leads endpoints and /admin user management (approval, stats, activity)."""
 
+import logging
 import re
 import threading
 from datetime import date, datetime, timedelta, timezone
@@ -23,9 +24,20 @@ from app.config import get_settings
 from app.db import get_db
 from app.jobs import run_lead_job
 from app.quota import get_quota_state, leads_to_fetch
+from app.usernames import UsernameError, validate_username
 from app import sheet_writer
 from typing import Final, Literal, Optional
 from pydantic import BaseModel, Field
+from supabase import create_client
+
+logger = logging.getLogger("uvicorn.error")  # prints to the server console
+
+# Starlette renamed the 422 constant; support both without touching the
+# deprecated name when the new one is available.
+HTTP_422_UNPROCESSABLE = (
+    getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", None)
+    or getattr(status, "HTTP_422_UNPROCESSABLE_ENTITY")
+)
 
 # --- /me response model ------------------------------------------------------
 
@@ -35,6 +47,7 @@ class ProfileOut(BaseModel):
 
     id: str
     email: Optional[str] = None
+    username: Optional[str] = None
     role: str
     status: str = "pending"  # pending / active / suspended
     daily_quota: int
@@ -107,6 +120,7 @@ class SignupIn(BaseModel):
 
     email: str
     password: str
+    username: str  # display name, validated by app.usernames
 
 
 class SignupOut(BaseModel):
@@ -114,7 +128,24 @@ class SignupOut(BaseModel):
 
     id: str
     email: Optional[str] = None
+    username: Optional[str] = None
     status: str = "pending"
+
+
+# --- /me request models --------------------------------------------------------
+
+
+class MeUpdateIn(BaseModel):
+    """PATCH /me body — the user's own display name."""
+
+    username: str
+
+
+class ChangeEmailIn(BaseModel):
+    """POST /me/change-email body."""
+
+    current_password: str  # verified, never logged
+    new_email: str
 
 
 # --- /admin request + response models ------------------------------------------
@@ -126,6 +157,7 @@ class AdminCreateUserIn(BaseModel):
     email: str
     password: str
     daily_quota: int = 50
+    username: Optional[str] = None  # optional display name
 
 
 class AdminUpdateUserIn(BaseModel):
@@ -234,9 +266,33 @@ def _own_profile(db: Client, user: SupabaseUser) -> dict:
     return response.data
 
 
+# --- username helpers -----------------------------------------------------------
+
+# Shown when public.profiles.username does not exist yet (migration_7a.sql).
+USERNAME_MIGRATION_HINT: Final[str] = (
+    "Database is not migrated yet — run backend/migration_7a.sql"
+)
+
+
+def _validated_username(raw: str) -> str:
+    """Validate a username; 422 with a clear message when it does not match."""
+    try:
+        return validate_username(raw)
+    except UsernameError as exc:
+        raise HTTPException(
+            HTTP_422_UNPROCESSABLE, str(exc)
+        ) from exc
+
+
+def _is_missing_username_column(exc: Exception) -> bool:
+    """True when PostgREST failed because profiles.username does not exist."""
+    message = str(exc).lower()
+    return "username" in message and ("column" in message or "schema cache" in message)
+
+
 # --- app setup ---------------------------------------------------------------
 
-app = FastAPI(title="Leads API")
+app = FastAPI(title="Lead Bank API")
 
 # Allow CORS from the configured frontend origins: comma-separated list,
 # surrounding whitespace and trailing slashes are ignored.
@@ -291,7 +347,8 @@ def signup(
     """Open signup: validate the input, create the auth user via the service key.
 
     The DB trigger creates the profiles row, which defaults to status
-    'pending' until an admin approves it. Passwords are never logged.
+    'pending' until an admin approves it. The display name is saved on that
+    profile right after the account exists. Passwords are never logged.
     """
     # Lowercase + validate the email; enforce the minimum password length.
     email_value = payload.email.strip().lower()
@@ -299,6 +356,8 @@ def signup(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid email address")
     if len(payload.password) < 8:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Password must be at least 8 characters")
+    # The username shares one rule everywhere (422 on a bad value).
+    username = _validated_username(payload.username)
 
     ip = request.client.host if request.client else "unknown"
     _check_signup_rate(ip)
@@ -315,7 +374,14 @@ def signup(
             raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Could not create user")
 
-    return SignupOut(id=created.user.id, email=email_value, status="pending")
+    # The account and its profile row exist now — store the display name.
+    # A pending migration must not block the signup; the name can be set
+    # later through PATCH /me.
+    _try_set_username(db, created.user.id, username)
+
+    return SignupOut(
+        id=created.user.id, email=email_value, username=username, status="pending"
+    )
 
 
 # --- routes ------------------------------------------------------------------
@@ -337,6 +403,109 @@ def me(
     if not response.data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Profile not found")
     return ProfileOut(**response.data)
+
+
+@app.patch("/me", response_model=ProfileOut)
+def update_me(
+    payload: MeUpdateIn,
+    user: SupabaseUser = Depends(get_current_user),
+    db: Client = Depends(get_db),
+) -> ProfileOut:
+    """Update the signed-in user's own display name (422 on a bad value)."""
+    username = _validated_username(payload.username)
+    return ProfileOut(**_set_username(db, user.id, username))
+
+
+# --- change email ---------------------------------------------------------------
+
+# In-memory sliding window: 5 attempts per user per 15 minutes.
+CHANGE_EMAIL_RATE_LIMIT: Final[int] = 5
+CHANGE_EMAIL_RATE_WINDOW: Final[timedelta] = timedelta(minutes=15)
+_change_email_attempts: dict[str, list[datetime]] = {}  # user_id -> attempt times (UTC)
+_change_email_lock = threading.Lock()  # sync endpoints run in a thread pool
+
+
+def _check_change_email_rate(user_id: str) -> None:
+    """Sliding-window rate limit for email changes: 5 per user per 15 minutes.
+
+    Every attempt that reaches the endpoint consumes the budget, successful or
+    not — that is what makes brute-forcing the current password pointless.
+    """
+    now = datetime.now(timezone.utc)
+    with _change_email_lock:
+        stamps = [
+            t for t in _change_email_attempts.get(user_id, []) if now - t < CHANGE_EMAIL_RATE_WINDOW
+        ]
+        if len(stamps) >= CHANGE_EMAIL_RATE_LIMIT:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "Too many email change attempts, try again later",
+            )
+        stamps.append(now)
+        _change_email_attempts[user_id] = stamps
+
+
+def _verify_password(email: str, password: str) -> bool:
+    """Verify a password with a THROWAWAY anon client (never the service client).
+
+    The shared service-key client must never sign in — that would clobber its
+    session. The password is handed to Supabase only and never logged.
+    """
+    if not email:
+        return False
+    settings = get_settings()
+    try:
+        throwaway = create_client(settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY)
+        result = throwaway.auth.sign_in_with_password({"email": email, "password": password})
+    except Exception:
+        return False  # wrong password or a Supabase error — same answer for both
+    return bool(result.session and result.session.access_token)
+
+
+@app.post("/me/change-email", response_model=ProfileOut)
+def change_email(
+    payload: ChangeEmailIn,
+    user: SupabaseUser = Depends(get_current_user),
+    db: Client = Depends(get_db),
+) -> ProfileOut:
+    """Change the signed-in user's own email address.
+
+    The current password must be confirmed first; a wrong password returns 400
+    "Current password is incorrect". An email that already belongs to another
+    account returns 409. Rate limited to 5 attempts per user per 15 minutes.
+    """
+    _check_change_email_rate(user.id)
+
+    new_email = payload.new_email.strip().lower()
+    if not _EMAIL_RE.match(new_email):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid email address")
+
+    current_email = (user.email or "").strip().lower()
+    if new_email == current_email:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "The new email is the same as the current one"
+        )
+
+    # 1. Confirm the current password (throwaway anon client, never logged).
+    if not _verify_password(current_email, payload.current_password):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is incorrect")
+
+    # 2. The new email must be free.
+    taken = db.table("profiles").select("id").eq("email", new_email).execute().data or []
+    if any(row.get("id") != user.id for row in taken):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
+
+    # 3. Move the auth user and the profile row to the new address.
+    try:
+        db.auth.admin.update_user_by_id(
+            user.id, {"email": new_email, "email_confirm": True}
+        )
+    except Exception as exc:
+        if "already" in str(exc).lower() or "registered" in str(exc).lower():
+            raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Could not update the email")
+
+    return ProfileOut(**_updated_profile(db, user.id, {"email": new_email}))
 
 
 @app.get("/admin/users", response_model=list[ProfileOut])
@@ -490,7 +659,16 @@ def sheet_link(
 
 def _updated_profile(db: Client, user_id: str, updates: dict) -> dict:
     """Apply a profiles update and return the fresh row; 404 when it vanishes."""
-    updated = db.table("profiles").update(updates).eq("id", user_id).execute()
+    try:
+        updated = db.table("profiles").update(updates).eq("id", user_id).execute()
+    except Exception as exc:
+        # The username column comes from a manual migration — say so clearly
+        # instead of failing with an opaque database error.
+        if _is_missing_username_column(exc):
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, USERNAME_MIGRATION_HINT
+            ) from exc
+        raise
     rows = updated.data or []
     if not rows:  # update may return nothing in odd cases — fetch explicitly
         rows = db.table("profiles").select("*").eq("id", user_id).execute().data or []
@@ -499,13 +677,45 @@ def _updated_profile(db: Client, user_id: str, updates: dict) -> dict:
     return rows[0]
 
 
+def _set_username(db: Client, user_id: str, username: str) -> dict:
+    """Save the display name on a profile row and return the fresh row.
+
+    Used by PATCH /me, signup and the admin user form.
+    """
+    return _updated_profile(db, user_id, {"username": username})
+
+
+def _try_set_username(db: Client, user_id: str, username: str) -> bool:
+    """Store the display name without failing the account creation for it.
+
+    Returns False when the profiles.username column does not exist yet
+    (migration_7a.sql): the account is created either way and the name can be
+    set later through PATCH /me. The problem is logged to the server console.
+    """
+    try:
+        _set_username(db, user_id, username)
+        return True
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
+            logger.warning("Username not stored: %s", exc.detail)
+            return False
+        raise
+
+
 @app.post("/admin/users", response_model=ProfileOut, status_code=status.HTTP_201_CREATED)
 def admin_create_user(
     payload: AdminCreateUserIn,
     _admin: SupabaseUser = Depends(require_admin),
     db: Client = Depends(get_db),
 ) -> ProfileOut:
-    """Create an auth user (service key, email confirmed) and set its daily quota."""
+    """Create an auth user (service key, email confirmed) and set its daily quota.
+
+    The display name is optional here; when it is given it must match the
+    shared username rule (422 on a bad value).
+    """
+    username = (
+        _validated_username(payload.username) if payload.username is not None else None
+    )
     try:
         created = db.auth.admin.create_user({
             "email": payload.email,
@@ -516,6 +726,10 @@ def admin_create_user(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Could not create user: {exc}")
 
     user_id = created.user.id
+    # The display name first (best effort — a pending migration must not
+    # break the account creation).
+    if username is not None:
+        _try_set_username(db, user_id, username)
     # The signup trigger has already created the profile row; admin-created
     # users are pre-approved: set the quota and status 'active'.
     return ProfileOut(

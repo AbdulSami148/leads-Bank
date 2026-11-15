@@ -10,6 +10,8 @@
  *     minute"; it returns to "idle" when the request finishes.
  *   - GET requests that fail with a network error or 502/503/504 are retried
  *     once automatically. POST /leads/get is never auto-retried.
+ *   - A 401 is retried once with the fresh Supabase session token, so a stale
+ *     token (e.g. right after a password change) never breaks the request.
  *   - If the backend is still unreachable after the retry, a friendly error
  *     ("Server is not responding, please try again in a minute") is raised
  *     instead of a raw network error.
@@ -26,6 +28,7 @@ import type {
   UserActivity,
 } from "./types";
 
+import { getSupabase } from "./supabase";
 import { serverStatus } from "./serverStatus";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -57,6 +60,18 @@ export function wakeBackend(): void {
   fetch(`${API_URL}/health`, { method: "GET" }).catch(() => {
     /* ignore — best-effort wake-up */
   });
+}
+
+/**
+ * The access token of the CURRENT Supabase session.
+ *
+ * The session is refreshed by Supabase in the background (and after a
+ * password change), so this always returns the freshest token — the API
+ * helper uses it to keep working when a cached token has gone stale.
+ */
+export async function currentAccessToken(): Promise<string | null> {
+  const { data } = await getSupabase().auth.getSession();
+  return data.session?.access_token ?? null;
 }
 
 async function request<T>(
@@ -106,6 +121,15 @@ async function request<T>(
       // Retry once for GET requests on 502/503/504.
       if (isGet && retryCount === 0 && RETRYABLE_STATUS_CODES.has(res.status)) {
         return request(path, accessToken, init, retryCount + 1);
+      }
+
+      // The cached token may be stale (e.g. right after a password change):
+      // retry once with the fresh session token before giving up.
+      if (res.status === 401 && retryCount === 0) {
+        const fresh = await currentAccessToken();
+        if (fresh && fresh !== accessToken) {
+          return request(path, fresh, init, retryCount + 1);
+        }
       }
 
       if (RETRYABLE_STATUS_CODES.has(res.status)) {
@@ -163,8 +187,22 @@ export function describeError(error: unknown): string {
 export const getMe = (token: string) => request<Profile>("/me", token);
 
 /** POST /auth/signup — open registration; returns the created (pending) account. */
-export const postSignup = (body: { email: string; password: string }) =>
+export const postSignup = (body: { email: string; password: string; username: string }) =>
   request<SignupOut>("/auth/signup", undefined, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+/** PATCH /me — update the signed-in user's display name. */
+export const patchMeUsername = (token: string, username: string) =>
+  request<Profile>("/me", token, {
+    method: "PATCH",
+    body: JSON.stringify({ username }),
+  });
+
+/** POST /me/change-email — change the signed-in user's email address. */
+export const postChangeEmail = (token: string, body: { current_password: string; new_email: string }) =>
+  request<Profile>("/me/change-email", token, {
     method: "POST",
     body: JSON.stringify(body),
   });
@@ -201,7 +239,7 @@ export const getAdminUserActivity = (token: string, userId: string) =>
 /** POST /admin/users — create a pre-approved user (email confirmed, status active). */
 export const adminCreateUser = (
   token: string,
-  body: { email: string; password: string; daily_quota: number },
+  body: { email: string; password: string; daily_quota: number; username?: string },
 ) =>
   request<Profile>("/admin/users", token, {
     method: "POST",

@@ -1,3 +1,53 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased;
+  }
+
+  /* One consistent focus ring for the whole app. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-indigo-500 ring-offset-2;
+  }
+
+  ::selection {
+    @apply bg-indigo-100 text-indigo-900;
+  }
+}
+
+@layer components {
+  /* Slim scrollbars inside cards and tables. */
+  .scroll-slim {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(148 163 184 / 0.5) transparent;
+  }
+
+  .scroll-slim::-webkit-scrollbar {
+    height: 8px;
+    width: 8px;
+  }
+
+  .scroll-slim::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-slate-300;
+  }
+
+  .scroll-slim::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

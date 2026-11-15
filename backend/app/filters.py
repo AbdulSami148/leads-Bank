@@ -174,3 +174,41 @@ def passes_filters(
         return (False, "no e-commerce signal in bio + snippet")
 
     return (True, "ok")
+
+
+def recheck_filters(profile: dict, max_followers: int = 10000) -> tuple[bool, str]:
+    """Re-check an already accepted lead against FRESH profile data only.
+
+    A bank lead was accepted earlier using its bio + the Google snippet, and
+    the snippet is not stored — so only the checks that fresh profile data can
+    actually invalidate are repeated here:
+
+      1. the profile data exists and carries a follower count
+      2. followers must be an int below max_followers
+      3. the account must not be private
+      4. the bio must contain no REJECT_SIGNALS
+
+    The Pakistan and e-commerce signals are NOT checked again — that decision
+    was already made when the lead was accepted, and re-running it without the
+    original snippet would drop genuine leads.
+
+    Returns (ok, reason).
+    """
+    if not profile:
+        return (False, "no profile data returned")
+
+    followers = profile.get("followers")
+    # bool is an int subclass — treat it as invalid too
+    if not isinstance(followers, int) or isinstance(followers, bool):
+        return (False, f"followers missing or not an int ({followers!r})")
+    if followers >= max_followers:
+        return (False, f"followers {followers} >= max {max_followers}")
+
+    if profile.get("is_private") is True:
+        return (False, "account is private")
+
+    rejected = _has_any(profile.get("bio") or "", REJECT_SIGNALS)
+    if rejected is not None:
+        return (False, f"reject signal {rejected!r}")
+
+    return (True, "ok")

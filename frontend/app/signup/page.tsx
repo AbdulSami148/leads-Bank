@@ -13,11 +13,12 @@ import { useRouter } from "next/navigation";
 import { ApiError, postSignup } from "@/lib/api";
 import { wakeBackend } from "@/lib/api";
 import { getSupabase } from "@/lib/supabase";
-import { Button, Card } from "@/components/ui";
+import { MAX_USERNAME_LENGTH, validateUsername } from "@/lib/username";
+import { LogoMark } from "@/components/logo";
+import { PasswordInput } from "@/components/password-input";
+import { Alert, Button, Card, Field, Input } from "@/components/ui";
 
 const MIN_PASSWORD_LENGTH = 8;
-const INPUT_CLASS =
-  "mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500";
 
 export default function SignupPage() {
   const router = useRouter();
@@ -26,10 +27,15 @@ export default function SignupPage() {
     wakeBackend();
   }, []);
   const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
+  const [usernameTouched, setUsernameTouched] = useState(false);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Live validation: the message appears as soon as the field was touched.
+  const usernameError = usernameTouched ? validateUsername(username) : null;
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -37,7 +43,13 @@ export default function SignupPage() {
     setError(null);
 
     const value = email.trim();
+    setUsernameTouched(true);
     // Client-side validation; the backend repeats these checks.
+    const nameError = validateUsername(username);
+    if (nameError) {
+      setError(nameError);
+      return;
+    }
     if (password.length < MIN_PASSWORD_LENGTH) {
       setError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
       return;
@@ -49,7 +61,7 @@ export default function SignupPage() {
 
     setBusy(true);
     try {
-      await postSignup({ email: value, password });
+      await postSignup({ email: value, password, username: username.trim() });
       // Automatic login right after signup, then straight to the dashboard.
       const { error: authError } = await getSupabase().auth.signInWithPassword({
         email: value,
@@ -77,71 +89,96 @@ export default function SignupPage() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center px-4">
+    <main className="flex min-h-screen flex-col items-center justify-center bg-gradient-to-b from-indigo-50 via-slate-50 to-slate-50 px-4 py-10">
       <div className="w-full max-w-sm">
-        <p className="mb-4 text-center text-lg font-semibold">Leads</p>
-        <Card className="p-6">
-          <h1 className="text-xl font-semibold">Create account</h1>
-          <p className="mt-1 text-sm text-gray-500">
+        <div className="mb-7 flex flex-col items-center gap-3 text-center">
+          <LogoMark className="h-11 w-11 rounded-2xl text-sm" />
+          <div>
+            <p className="text-lg font-semibold tracking-tight text-slate-900">Lead Bank</p>
+            <p className="mt-1 text-sm text-slate-500">Fresh Instagram leads for your business</p>
+          </div>
+        </div>
+
+        <Card className="animate-slide-up p-6 sm:p-7">
+          <h1 className="text-xl font-semibold tracking-tight text-slate-900">Create account</h1>
+          <p className="mt-1 text-sm text-slate-500">
             Sign up — you get access once the admin approves your account.
           </p>
 
-          <form onSubmit={handleSubmit} className="mt-5 space-y-4">
-            <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-600">
-                Email
-              </label>
-              <input
+          <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+            <Field
+              label="Name"
+              htmlFor="username"
+              hint="Your display name, e.g. Ali Khan — letters and single spaces."
+              error={usernameError}
+            >
+              <Input
+                id="username"
+                type="text"
+                required
+                minLength={2}
+                maxLength={MAX_USERNAME_LENGTH}
+                autoComplete="name"
+                placeholder="Ali Khan"
+                value={username}
+                onChange={(event) => {
+                  setUsername(event.target.value);
+                  setUsernameTouched(true);
+                }}
+                onBlur={() => setUsernameTouched(true)}
+                aria-invalid={usernameError ? true : undefined}
+              />
+            </Field>
+
+            <Field label="Email" htmlFor="email">
+              <Input
                 id="email"
                 type="email"
                 required
                 autoComplete="email"
+                placeholder="you@example.com"
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
-                className={INPUT_CLASS}
               />
-            </div>
-            <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-600">
-                Password
-              </label>
-              <input
+            </Field>
+
+            <Field
+              label="Password"
+              htmlFor="password"
+              hint={`At least ${MIN_PASSWORD_LENGTH} characters.`}
+            >
+              <PasswordInput
                 id="password"
-                type="password"
-                required
-                minLength={MIN_PASSWORD_LENGTH}
-                autoComplete="new-password"
                 value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                className={INPUT_CLASS}
-              />
-            </div>
-            <div>
-              <label htmlFor="confirm" className="block text-sm font-medium text-gray-600">
-                Confirm password
-              </label>
-              <input
-                id="confirm"
-                type="password"
-                required
-                minLength={MIN_PASSWORD_LENGTH}
+                onChange={setPassword}
                 autoComplete="new-password"
-                value={confirm}
-                onChange={(event) => setConfirm(event.target.value)}
-                className={INPUT_CLASS}
+                placeholder="Choose a password"
               />
-            </div>
+            </Field>
 
-            {error && <p className="text-sm text-red-600">{error}</p>}
+            <Field label="Confirm password" htmlFor="confirm">
+              <PasswordInput
+                id="confirm"
+                value={confirm}
+                onChange={setConfirm}
+                autoComplete="new-password"
+                placeholder="Repeat your password"
+              />
+            </Field>
 
-            <Button type="submit" loading={busy} className="w-full py-2.5">
+            {error && <Alert kind="error">{error}</Alert>}
+
+            <Button type="submit" loading={busy} size="lg" className="w-full">
               Sign up
             </Button>
           </form>
 
-          <p className="mt-4 text-center text-sm text-gray-500">
+          <p className="mt-5 text-center text-sm text-slate-500">
             Already have an account?{" "}
-            <Link href="/login" className="font-medium text-blue-600 transition hover:underline">
+            <Link
+              href="/login"
+              className="font-medium text-indigo-600 transition hover:text-indigo-700 hover:underline"
+            >
               Sign in
             </Link>
           </p>

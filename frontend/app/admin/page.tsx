@@ -12,6 +12,16 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
+  Activity,
+  BarChart3,
+  MoreHorizontal,
+  Plus,
+  ShieldCheck,
+  UserCheck,
+  Users as UsersIcon,
+  UserX,
+} from "lucide-react";
+import {
   adminApproveUser,
   adminCreateUser,
   adminUpdateUser,
@@ -23,21 +33,26 @@ import {
 import { formatDate } from "@/lib/format";
 import { useSessionGuard } from "@/lib/session";
 import type { AccountStatus, AdminStats, Profile } from "@/lib/types";
-import { TopBar } from "@/components/topbar";
+import { MAX_USERNAME_LENGTH, validateUsername } from "@/lib/username";
+import { PasswordInput } from "@/components/password-input";
 import { useToast } from "@/components/toast";
 import {
+  Avatar,
   Badge,
   Button,
   Card,
+  Dropdown,
   EmptyState,
+  Field,
+  Input,
   Modal,
   Skeleton,
+  StatCard,
   Toggle,
+  type DropdownItem,
 } from "@/components/ui";
 
 const MIN_PASSWORD_LENGTH = 8;
-const INPUT_CLASS =
-  "mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500";
 
 /** Toolbar tabs: every status plus "all". */
 type StatusTab = "all" | AccountStatus;
@@ -60,6 +75,7 @@ export default function AdminPage() {
   // Add-user modal (password is cleared right after submit — never stored).
   const [addOpen, setAddOpen] = useState(false);
   const [newEmail, setNewEmail] = useState("");
+  const [newUsername, setNewUsername] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [newQuota, setNewQuota] = useState("50");
   const [creating, setCreating] = useState(false);
@@ -129,6 +145,15 @@ export default function AdminPage() {
       toast("error", "Daily quota must be a whole number between 1 and 1000.");
       return;
     }
+    // Optional username validation (letters and single spaces, 2-30 chars)
+    const trimmedUsername = newUsername.trim();
+    if (trimmedUsername) {
+      const nameError = validateUsername(trimmedUsername);
+      if (nameError) {
+        toast("error", nameError);
+        return;
+      }
+    }
 
     setCreating(true);
     try {
@@ -136,9 +161,11 @@ export default function AdminPage() {
         email: newEmail.trim(),
         password: newPassword,
         daily_quota: parsedQuota,
+        username: trimmedUsername || undefined,
       });
       // Never keep or show the password: clear the form immediately.
       setNewEmail("");
+      setNewUsername("");
       setNewPassword("");
       setNewQuota("50");
       setAddOpen(false);
@@ -185,181 +212,212 @@ export default function AdminPage() {
   // --- render -------------------------------------------------------------------
 
   if (!ready) {
-    // The guard redirects when not allowed; show skeletons while it works.
+    // The guard redirects when not allowed; the layout frame shows the
+    // sidebar skeleton — these fill the page area while the role check runs.
     return (
-      <main className="min-h-screen">
-        <TopBar showUsers current="users" email={profile?.email} />
-        <div className="mx-auto max-w-6xl space-y-4 px-4 py-8">
-          <Skeleton className="h-8 w-40" />
-          <Skeleton className="h-24 w-full" />
-          <Skeleton className="h-64 w-full" />
+      <div className="space-y-6">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {[0, 1, 2, 3].map((card) => (
+            <Skeleton key={card} className="h-28 w-full" />
+          ))}
         </div>
-      </main>
+        <Skeleton className="h-20 w-full" />
+        <Skeleton className="h-72 w-full" />
+      </div>
     );
   }
 
   return (
-    <main className="min-h-screen">
-      <TopBar showUsers current="users" email={profile?.email} />
-
-      <div className="mx-auto max-w-6xl px-4 py-8">
-        <h1 className="text-xl font-semibold">Users</h1>
-        <p className="text-sm text-gray-500">
+    <>
+      <header>
+        <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Users</h1>
+        <p className="mt-1 text-sm text-slate-500">
           Approve accounts, set quotas and monitor activity.
         </p>
+      </header>
 
-        {/* stat cards */}
-        <div className="mt-6 grid gap-4 sm:grid-cols-3">
-          {[
-            { label: "Total users", value: stats?.total_users },
-            { label: "Pending approval", value: stats?.pending_users },
-            { label: "Delivered today", value: stats?.delivered_today },
-          ].map((card) => (
-            <Card key={card.label} className="p-5">
-              <p className="text-sm text-gray-500">{card.label}</p>
-              {card.value === undefined ? (
-                <Skeleton className="mt-1 h-8 w-16" />
-              ) : (
-                <p className="mt-1 text-2xl font-semibold">{card.value}</p>
-              )}
-            </Card>
+      {/* stat cards */}
+      <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          label="Total users"
+          value={stats?.total_users}
+          icon={UsersIcon}
+          loading={!stats}
+          hint="All accounts"
+        />
+        <StatCard
+          label="Pending approval"
+          value={stats?.pending_users}
+          icon={UserCheck}
+          loading={!stats}
+          hint="Waiting for review"
+        />
+        <StatCard
+          label="Active users"
+          value={stats?.active_users}
+          icon={ShieldCheck}
+          loading={!stats}
+          hint="Can fetch leads"
+        />
+        <StatCard
+          label="Delivered today"
+          value={stats?.delivered_today}
+          icon={BarChart3}
+          loading={!stats}
+          hint="Leads sent (UTC)"
+        />
+      </div>
+
+      {/* toolbar: search, status tabs, add user */}
+      <Card className="mt-6 p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <Input
+            type="search"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search by email…"
+            aria-label="Search users by email"
+            className="w-full sm:max-w-xs"
+          />
+          <Button onClick={() => setAddOpen(true)}>
+            <Plus className="h-4 w-4" aria-hidden />
+            Add user
+          </Button>
+        </div>
+        <div className="mt-4 flex flex-wrap gap-2" role="tablist" aria-label="Filter by status">
+          {TABS.map((statusTab) => (
+            <button
+              key={statusTab}
+              onClick={() => setTab(statusTab)}
+              role="tab"
+              aria-selected={tab === statusTab}
+              className={`rounded-full px-3.5 py-1.5 text-sm font-medium capitalize transition ${
+                tab === statusTab
+                  ? "bg-indigo-600 text-white shadow-sm"
+                  : "bg-slate-100 text-slate-600 hover:bg-slate-200 hover:text-slate-800"
+              }`}
+            >
+              {statusTab} ({counts[statusTab]})
+            </button>
           ))}
         </div>
+      </Card>
 
-        {/* toolbar: search, status tabs, add user */}
-        <Card className="mt-6 p-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <input
-              type="search"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search by email…"
-              aria-label="Search users by email"
-              className="w-full max-w-xs rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-            />
-            <Button onClick={() => setAddOpen(true)}>+ Add user</Button>
-          </div>
-          <div className="mt-3 flex flex-wrap gap-2" role="tablist" aria-label="Filter by status">
-            {TABS.map((statusTab) => (
-              <button
-                key={statusTab}
-                onClick={() => setTab(statusTab)}
-                role="tab"
-                aria-selected={tab === statusTab}
-                className={`rounded-full px-3 py-1.5 text-sm capitalize transition ${
-                  tab === statusTab
-                    ? "bg-blue-600 text-white"
-                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-                }`}
-              >
-                {statusTab} ({counts[statusTab]})
-              </button>
+      {/* users table */}
+      <Card className="mt-4 overflow-hidden">
+        {loadError ? (
+          <EmptyState
+            title="Could not load users"
+            description={loadError}
+            icon={UsersIcon}
+            action={
+              <Button variant="secondary" onClick={() => void load()}>
+                Try again
+              </Button>
+            }
+          />
+        ) : !loaded ? (
+          <div className="space-y-3 p-5">
+            {[0, 1, 2, 3].map((row) => (
+              <Skeleton key={row} className="h-12 w-full" />
             ))}
           </div>
-        </Card>
-
-        {/* users table */}
-        <Card className="mt-4">
-          {loadError ? (
-            <EmptyState
-              title="Could not load users"
-              description={loadError}
-              action={
-                <Button variant="secondary" onClick={() => void load()}>
-                  Try again
-                </Button>
-              }
-            />
-          ) : !loaded ? (
-            <div className="space-y-3 p-5">
-              {[0, 1, 2, 3].map((row) => (
-                <Skeleton key={row} className="h-10 w-full" />
-              ))}
-            </div>
-          ) : visibleUsers.length === 0 ? (
-            <EmptyState
-              title="No users match"
-              description={
-                search
-                  ? "Try a different email or clear the filter."
-                  : "No accounts with this status yet."
-              }
-            />
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[900px] text-left text-sm">
-                <thead>
-                  <tr className="border-b border-gray-100 text-xs uppercase tracking-wide text-gray-400">
-                    <th className="px-4 py-2.5">Email</th>
-                    <th className="px-4 py-2.5">Status</th>
-                    <th className="px-4 py-2.5">Daily quota</th>
-                    <th className="px-4 py-2.5">Cooldown</th>
-                    <th className="px-4 py-2.5">Leads today</th>
-                    <th className="px-4 py-2.5">Sheet linked</th>
-                    <th className="px-4 py-2.5">Joined</th>
-                    <th className="px-4 py-2.5 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visibleUsers.map((user) => (
-                    <UserRow
-                      key={user.id}
-                      user={user}
-                      token={token ?? ""}
-                      onChanged={load}
-                      onApprove={(candidate) => {
-                        setApproveQuota("50"); // default per spec
-                        setApproveUser(candidate);
-                      }}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Card>
-      </div>
+        ) : visibleUsers.length === 0 ? (
+          <EmptyState
+            title="No users match"
+            description={
+              search
+                ? "Try a different email or clear the filter."
+                : "No accounts with this status yet."
+            }
+            icon={UsersIcon}
+          />
+        ) : (
+          <div className="scroll-slim overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 bg-slate-50/70 text-xs uppercase tracking-wide text-slate-500">
+                  <th className="px-2.5 py-3 pl-4 font-medium">User</th>
+                  <th className="px-2.5 py-3 font-medium">Status</th>
+                  <th className="px-2.5 py-3 font-medium">Daily quota</th>
+                  <th className="px-2.5 py-3 font-medium">Cooldown</th>
+                  <th className="px-2.5 py-3 font-medium">Leads today</th>
+                  <th className="px-2.5 py-3 font-medium">Sheet</th>
+                  <th className="px-2.5 py-3 font-medium">Joined</th>
+                  <th className="px-2.5 py-3 pr-4 text-right font-medium">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleUsers.map((user) => (
+                  <UserRow
+                    key={user.id}
+                    user={user}
+                    token={token ?? ""}
+                    onChanged={load}
+                    onApprove={(candidate) => {
+                      setApproveQuota("50"); // default per spec
+                      setApproveUser(candidate);
+                    }}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
 
       {/* add-user modal */}
       <Modal open={addOpen} title="Add user" onClose={() => !creating && setAddOpen(false)}>
         <form onSubmit={handleCreateUser} className="space-y-4">
-          <div>
-            <label htmlFor="new-email" className="block text-sm font-medium text-gray-600">
-              Email
-            </label>
-            <input
+          <Field label="Email" htmlFor="new-email">
+            <Input
               id="new-email"
               type="email"
               required
               autoComplete="off"
+              placeholder="user@example.com"
               value={newEmail}
               onChange={(event) => setNewEmail(event.target.value)}
-              className={INPUT_CLASS}
             />
-          </div>
-          <div>
-            <label htmlFor="new-password" className="block text-sm font-medium text-gray-600">
-              Password
-            </label>
-            <input
+          </Field>
+          <Field
+            label="Name (optional)"
+            htmlFor="new-username"
+            hint="Display name, e.g. Ali Khan — letters and single spaces."
+            error={
+              newUsername.trim() ? validateUsername(newUsername, { required: false }) : null
+            }
+          >
+            <Input
+              id="new-username"
+              type="text"
+              maxLength={MAX_USERNAME_LENGTH}
+              autoComplete="name"
+              placeholder="Ali Khan"
+              value={newUsername}
+              onChange={(event) => setNewUsername(event.target.value)}
+              aria-invalid={
+                newUsername.trim() && validateUsername(newUsername, { required: false })
+                  ? true
+                  : undefined
+              }
+            />
+          </Field>
+          <Field
+            label="Password"
+            htmlFor="new-password"
+            hint={`At least ${MIN_PASSWORD_LENGTH} characters.`}
+          >
+            <PasswordInput
               id="new-password"
-              type="password"
-              required
-              minLength={MIN_PASSWORD_LENGTH}
-              autoComplete="new-password"
               value={newPassword}
-              onChange={(event) => setNewPassword(event.target.value)}
-              className={INPUT_CLASS}
+              onChange={setNewPassword}
+              autoComplete="new-password"
+              placeholder="Temporary password"
             />
-            <p className="mt-1 text-xs text-gray-400">
-              At least {MIN_PASSWORD_LENGTH} characters.
-            </p>
-          </div>
-          <div>
-            <label htmlFor="new-quota" className="block text-sm font-medium text-gray-600">
-              Daily quota
-            </label>
-            <input
+          </Field>
+          <Field label="Daily quota" htmlFor="new-quota">
+            <Input
               id="new-quota"
               type="number"
               min={1}
@@ -367,9 +425,8 @@ export default function AdminPage() {
               required
               value={newQuota}
               onChange={(event) => setNewQuota(event.target.value)}
-              className={INPUT_CLASS}
             />
-          </div>
+          </Field>
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="secondary" onClick={() => setAddOpen(false)} disabled={creating}>
               Cancel
@@ -389,16 +446,15 @@ export default function AdminPage() {
       >
         {approveUser && (
           <form onSubmit={handleApprove} className="space-y-4">
-            <p className="text-sm text-gray-500">
+            <p className="text-sm text-slate-600">
               Set the daily quota for{" "}
-              <span className="font-medium">{approveUser.email ?? approveUser.id}</span> and
-              activate the account.
+              <span className="font-medium text-slate-900">
+                {approveUser.email ?? approveUser.id}
+              </span>{" "}
+              and activate the account.
             </p>
-            <div>
-              <label htmlFor="approve-quota" className="block text-sm font-medium text-gray-600">
-                Daily quota
-              </label>
-              <input
+            <Field label="Daily quota" htmlFor="approve-quota">
+              <Input
                 id="approve-quota"
                 type="number"
                 min={1}
@@ -406,9 +462,8 @@ export default function AdminPage() {
                 required
                 value={approveQuota}
                 onChange={(event) => setApproveQuota(event.target.value)}
-                className={INPUT_CLASS}
               />
-            </div>
+            </Field>
             <div className="flex justify-end gap-2 pt-2">
               <Button
                 variant="secondary"
@@ -424,7 +479,7 @@ export default function AdminPage() {
           </form>
         )}
       </Modal>
-    </main>
+    </>
   );
 }
 
@@ -483,16 +538,63 @@ function UserRow({
   }
 
   const email = user.email ?? user.id;
+  const displayName = user.username ?? email;
+
+  // Compact actions menu — the common actions live in a dropdown.
+  const items: DropdownItem[] = [];
+  if (user.status === "pending") {
+    items.push({
+      id: "approve",
+      label: "Approve",
+      icon: UserCheck,
+      disabled: busy,
+      onSelect: () => onApprove(user),
+    });
+  }
+  if (user.status === "active") {
+    items.push({
+      id: "suspend",
+      label: "Suspend",
+      icon: UserX,
+      disabled: busy,
+      onSelect: () => void patch("status", { status: "suspended" }, `${email} suspended.`),
+    });
+  }
+  if (user.status === "suspended") {
+    items.push({
+      id: "activate",
+      label: "Activate",
+      icon: ShieldCheck,
+      disabled: busy,
+      onSelect: () => void patch("status", { status: "active" }, `${email} activated.`),
+    });
+  }
+  items.push({
+    id: "activity",
+    label: "View activity",
+    icon: Activity,
+    href: `/admin/users/${user.id}`,
+  });
 
   return (
-    <tr className="border-b border-gray-100 last:border-0">
-      <td className="px-4 py-3 font-medium break-all">{email}</td>
-      <td className="px-4 py-3">
+    <tr className="border-b border-slate-100 transition last:border-0 hover:bg-slate-50/60">
+      <td className="px-2.5 py-3 pl-4 min-w-[150px]">
+        <div className="flex items-center gap-2.5">
+          <Avatar name={displayName} size="sm" />
+          <div className="min-w-0 flex flex-col">
+            <span className="font-medium text-slate-800 truncate">{displayName}</span>
+            {user.username && (
+              <span className="truncate text-xs text-slate-500">{email}</span>
+            )}
+          </div>
+        </div>
+      </td>
+      <td className="px-2.5 py-3">
         <Badge kind={user.status} />
       </td>
-      <td className="px-4 py-3">
+      <td className="px-2.5 py-3">
         <div className="flex items-center gap-1.5">
-          <input
+          <Input
             type="number"
             min={1}
             max={1000}
@@ -503,10 +605,11 @@ function UserRow({
               if (event.key === "Enter") saveQuota();
             }}
             aria-label={`Daily quota for ${email}`}
-            className="w-20 rounded-lg border border-gray-300 px-2 py-1.5 text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            className="w-28 flex-none px-3 py-1.5 text-center tabular-nums appearance-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
           />
           <Button
             variant="secondary"
+            size="sm"
             loading={busyKind === "quota"}
             disabled={busy || Number(quota) === user.daily_quota}
             onClick={saveQuota}
@@ -515,8 +618,8 @@ function UserRow({
           </Button>
         </div>
       </td>
-      <td className="px-4 py-3">
-        <div className="flex items-center gap-2">
+      <td className="px-2.5 py-3">
+        <div className="flex items-center gap-1.5">
           <Toggle
             checked={user.cooldown_enabled}
             disabled={busy}
@@ -529,43 +632,41 @@ function UserRow({
               )
             }
           />
-          <span className="text-gray-500">{user.cooldown_enabled ? "On" : "Off"}</span>
+          <span className="text-slate-500">{user.cooldown_enabled ? "On" : "Off"}</span>
         </div>
       </td>
-      <td className="px-4 py-3">{user.leads_today}</td>
-      <td className="px-4 py-3">{user.sheet_url ? "Yes" : "No"}</td>
-      <td className="whitespace-nowrap px-4 py-3">{formatDate(user.created_at)}</td>
-      <td className="px-4 py-3">
-        <div className="flex justify-end gap-2 whitespace-nowrap">
-          {user.status === "pending" && (
-            <Button disabled={busy} onClick={() => onApprove(user)}>
-              Approve
-            </Button>
-          )}
-          {user.status === "active" && (
-            <Button
-              variant="secondary"
-              disabled={busy}
-              onClick={() => void patch("status", { status: "suspended" }, `${email} suspended.`)}
+      <td className="px-2.5 py-3 tabular-nums text-slate-700">{user.leads_today}</td>
+      <td className="px-2.5 py-3">
+        <span className={user.sheet_url ? "text-slate-700" : "text-slate-400"}>
+          {user.sheet_url ? "Linked" : "—"}
+        </span>
+      </td>
+      <td className="whitespace-nowrap px-2.5 py-3 text-xs text-slate-600">
+        {formatDate(user.created_at)}
+      </td>
+      <td className="px-2.5 py-3 pr-4 text-right">
+        <div className="flex items-center justify-end gap-0.5">
+          {items.length > 1 && (
+            <Link
+              href={`/admin/users/${user.id}`}
+              className="rounded-lg px-2 py-1.5 text-sm font-medium text-indigo-600 transition hover:bg-indigo-50 hover:text-indigo-700"
             >
-              Suspend
-            </Button>
+              Activity
+            </Link>
           )}
-          {user.status === "suspended" && (
-            <Button
-              variant="secondary"
-              disabled={busy}
-              onClick={() => void patch("status", { status: "active" }, `${email} activated.`)}
-            >
-              Activate
-            </Button>
-          )}
-          <Link
-            href={`/admin/users/${user.id}`}
-            className="rounded-lg px-2 py-1.5 text-sm font-medium text-blue-600 transition hover:underline"
-          >
-            View activity
-          </Link>
+          <Dropdown
+            menuLabel={`Actions for ${email}`}
+            items={items}
+            trigger={(props) => (
+              <button
+                {...props}
+                aria-label={`Actions for ${email}`}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"
+              >
+                <MoreHorizontal className="h-4 w-4" aria-hidden />
+              </button>
+            )}
+          />
         </div>
       </td>
     </tr>
